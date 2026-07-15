@@ -291,6 +291,18 @@ export default function App() {
     try { await storage.delete("hris:session"); } catch {}
   }
 
+  async function changePassword(userId, newPassword) {
+    const next = users.map((u) => (u.id === userId ? { ...u, password: newPassword, pwChangedAt: new Date().toISOString() } : u));
+    if (await persist("users", next)) {
+      notify("Password updated.");
+      return true;
+    }
+    return false;
+  }
+
+  /* The seeded admin ships with a known default password — force a change before use. */
+  const mustChangePassword = me && me.email === "admin@company.com" && me.password === "admin123";
+
   async function punch(kind) {
     const key = todayKey();
     let next;
@@ -319,8 +331,10 @@ export default function App() {
       )}
       {!me ? (
         <LoginScreen onLogin={login} />
+      ) : mustChangePassword ? (
+        <ForcePasswordChange me={me} onChange={changePassword} onLogout={logout} />
       ) : (
-        <Shell me={me} tab={tab} setTab={setTab} onLogout={logout}>
+        <Shell me={me} tab={tab} setTab={setTab} onLogout={logout} onChangePassword={changePassword}>
           {me.role === "admin" ? (
             <AdminView tab={tab} users={users} attendance={attendance} leaves={leaves} concerns={concerns} persist={persist} notify={notify} busy={busy} />
           ) : (
@@ -371,9 +385,65 @@ function LoginScreen({ onLogin }) {
   );
 }
 
+/* ------------------------ password screens ------------------------- */
+
+function PasswordFields({ onSubmit, submitLabel, requireCurrent, currentPassword }) {
+  const [cur, setCur] = useState("");
+  const [pw1, setPw1] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [err, setErr] = useState(null);
+
+  async function submit() {
+    setErr(null);
+    if (requireCurrent && cur !== currentPassword) return setErr("Current password is incorrect.");
+    if (pw1.length < 8) return setErr("New password must be at least 8 characters.");
+    if (pw1 === "admin123") return setErr("Pick something other than the default password.");
+    if (pw1 !== pw2) return setErr("The two entries don't match.");
+    const ok = await onSubmit(pw1);
+    if (ok) { setCur(""); setPw1(""); setPw2(""); }
+  }
+
+  return (
+    <>
+      {requireCurrent && (
+        <Field label="Current password">
+          <input style={inputStyle} type="password" value={cur} onChange={(e) => setCur(e.target.value)} />
+        </Field>
+      )}
+      <Field label="New password">
+        <input style={inputStyle} type="password" value={pw1} onChange={(e) => setPw1(e.target.value)} placeholder="At least 8 characters" />
+      </Field>
+      <Field label="Confirm new password">
+        <input style={inputStyle} type="password" value={pw2} onChange={(e) => setPw2(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
+      </Field>
+      {err && <p style={{ color: T.red, fontSize: 13, margin: "0 0 10px" }}>{err}</p>}
+      <Btn kind="blue" style={{ width: "100%" }} onClick={submit}>{submitLabel}</Btn>
+    </>
+  );
+}
+
+function ForcePasswordChange({ me, onChange, onLogout }) {
+  return (
+    <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 20 }}>
+      <div style={{ width: "100%", maxWidth: 400 }}>
+        <div style={{ textAlign: "center", marginBottom: 18 }}>
+          <img src={LOGO_SQUARE} alt="Freedom Outsourcing" style={{ width: 110, height: 110, objectFit: "contain" }} />
+          <h1 style={{ fontFamily: DISPLAY, fontSize: 22, margin: "6px 0 4px" }}>Set a new admin password</h1>
+          <p style={{ color: T.muted, fontSize: 13, margin: 0 }}>This account is still using the default password. Choose a new one to continue.</p>
+        </div>
+        <Card>
+          <PasswordFields submitLabel="Save new password" onSubmit={(pw) => onChange(me.id, pw)} />
+          <button onClick={onLogout} style={{ background: "none", border: "none", color: T.faint, fontSize: 12, cursor: "pointer", marginTop: 12, width: "100%", fontFamily: BODY }}>Sign out instead</button>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
 /* ---------------------------- shell -------------------------------- */
 
-function Shell({ me, tab, setTab, onLogout, children }) {
+function Shell({ me, tab, setTab, onLogout, onChangePassword, children }) {
+  const [showPw, setShowPw] = useState(false);
   const tabs =
     me.role === "admin"
       ? [["home", "Overview"], ["interns", "Interns"], ["leaves", "Leave requests"], ["concerns", "Concerns"], ["attendance", "Attendance"]]
@@ -388,11 +458,27 @@ function Shell({ me, tab, setTab, onLogout, children }) {
             {me.role === "admin" ? "HR CONSOLE" : "INTERN"}
           </span>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <span style={{ fontSize: 13, color: T.muted }}>{me.name}</span>
+          <Btn kind="ghost" onClick={() => setShowPw(true)} style={{ padding: "7px 12px", fontSize: 13 }}>Change password</Btn>
           <Btn kind="ghost" onClick={onLogout} style={{ padding: "7px 14px" }}>Sign out</Btn>
         </div>
       </header>
+
+      {showPw && (
+        <div onClick={() => setShowPw(false)} style={{ position: "fixed", inset: 0, background: "rgba(22,35,58,.45)", display: "grid", placeItems: "center", zIndex: 40, padding: 20 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 380 }}>
+            <Card title="Change password" right={<button onClick={() => setShowPw(false)} style={{ background: "none", border: "none", fontSize: 18, color: T.muted, cursor: "pointer" }}>×</button>}>
+              <PasswordFields
+                requireCurrent
+                currentPassword={me.password}
+                submitLabel="Update password"
+                onSubmit={async (pw) => { const ok = await onChangePassword(me.id, pw); if (ok) setShowPw(false); return ok; }}
+              />
+            </Card>
+          </div>
+        </div>
+      )}
 
       <nav style={{ display: "flex", gap: 6, marginBottom: 20, flexWrap: "wrap" }}>
         {tabs.map(([k, label]) => (
@@ -765,6 +851,14 @@ function ManageInterns({ users, interns, persist, notify, busy }) {
     }
   }
 
+  async function resetPassword(id, name) {
+    const pw = prompt(`New password for ${name} (at least 8 characters):`);
+    if (pw === null) return;
+    if (pw.length < 8) return notify("Password not changed — it must be at least 8 characters.");
+    const next = users.map((u) => (u.id === id ? { ...u, password: pw, pwChangedAt: new Date().toISOString() } : u));
+    if (await persist("users", next)) notify(`Password reset for ${name}. Share it with them securely.`);
+  }
+
   async function toggleActive(id) {
     const next = users.map((u) => (u.id === id ? { ...u, active: u.active === false } : u));
     if (await persist("users", next)) notify("Account status updated.");
@@ -792,6 +886,7 @@ function ManageInterns({ users, interns, persist, notify, busy }) {
             </div>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <Badge status={i.active === false ? "Deactivated" : "Active"} />
+              <Btn kind="ghost" disabled={busy} style={{ padding: "6px 12px", fontSize: 12 }} onClick={() => resetPassword(i.id, i.name)}>Reset password</Btn>
               <Btn kind="ghost" disabled={busy} style={{ padding: "6px 12px", fontSize: 12 }} onClick={() => toggleActive(i.id)}>
                 {i.active === false ? "Reactivate" : "Deactivate"}
               </Btn>
