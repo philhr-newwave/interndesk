@@ -66,7 +66,7 @@ const SEED_ADMIN = {
   id: "admin-1",
   role: "admin",
   name: "HR Administrator",
-  email: "admin@company.com",
+  email: "philhr@new-wave.com.au",
   password: "admin123",
   active: true,
 };
@@ -248,6 +248,10 @@ export default function App() {
       if (!u || !u.length) {
         u = [SEED_ADMIN];
         await saveKey("hris:users", u);
+      } else if (u.some((x) => x.email === "admin@company.com")) {
+        /* one-time migration: admin email changed to philhr@new-wave.com.au */
+        u = u.map((x) => (x.email === "admin@company.com" ? { ...x, email: "philhr@new-wave.com.au" } : x));
+        await saveKey("hris:users", u);
       }
       setUsers(u);
       setAttendance(await loadKey("hris:attendance", []));
@@ -301,7 +305,7 @@ export default function App() {
   }
 
   /* The seeded admin ships with a known default password — force a change before use. */
-  const mustChangePassword = me && me.email === "admin@company.com" && me.password === "admin123";
+  const mustChangePassword = me && me.email === "philhr@new-wave.com.au" && me.password === "admin123";
 
   async function punch(kind) {
     const key = todayKey();

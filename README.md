@@ -11,7 +11,7 @@ npm run dev
 
 Then open the printed local URL. Sign in with the seeded admin account:
 
-- **Email:** `admin@company.com`
+- **Email:** `philhr@new-wave.com.au`
 - **Password:** `admin123`
 
 Change this account's details before real use — add yourself as needed and treat the seed credentials as disposable.
