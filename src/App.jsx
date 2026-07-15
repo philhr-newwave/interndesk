@@ -229,6 +229,7 @@ export default function App() {
   const [attendance, setAttendance] = useState([]);
   const [leaves, setLeaves] = useState([]);
   const [concerns, setConcerns] = useState([]);
+  const [coas, setCoas] = useState([]);
   const [sessionId, setSessionId] = useState(null);
   const [tab, setTab] = useState("home");
   const [toast, setToast] = useState(null);
@@ -257,6 +258,7 @@ export default function App() {
       setAttendance(await loadKey("hris:attendance", []));
       setLeaves(await loadKey("hris:leaves", []));
       setConcerns(await loadKey("hris:concerns", []));
+      setCoas(await loadKey("hris:coas", []));
       try {
         const s = await storage.get("hris:session");
         if (s) setSessionId(JSON.parse(s.value));
@@ -272,7 +274,7 @@ export default function App() {
 
   async function persist(kind, next) {
     setBusy(true);
-    const setters = { users: setUsers, attendance: setAttendance, leaves: setLeaves, concerns: setConcerns };
+    const setters = { users: setUsers, attendance: setAttendance, leaves: setLeaves, concerns: setConcerns, coas: setCoas };
     setters[kind](next);
     const ok = await saveKey("hris:" + kind, next);
     if (!ok) notify("Couldn't save — check your connection and try again.");
@@ -340,9 +342,9 @@ export default function App() {
       ) : (
         <Shell me={me} tab={tab} setTab={setTab} onLogout={logout} onChangePassword={changePassword}>
           {me.role === "admin" ? (
-            <AdminView tab={tab} users={users} attendance={attendance} leaves={leaves} concerns={concerns} persist={persist} notify={notify} busy={busy} />
+            <AdminView tab={tab} users={users} attendance={attendance} leaves={leaves} concerns={concerns} coas={coas} persist={persist} notify={notify} busy={busy} />
           ) : (
-            <InternView tab={tab} me={me} attendance={attendance} leaves={leaves} concerns={concerns} persist={persist} punch={punch} notify={notify} busy={busy} />
+            <InternView tab={tab} me={me} attendance={attendance} leaves={leaves} concerns={concerns} coas={coas} persist={persist} punch={punch} notify={notify} busy={busy} />
           )}
         </Shell>
       )}
@@ -450,8 +452,8 @@ function Shell({ me, tab, setTab, onLogout, onChangePassword, children }) {
   const [showPw, setShowPw] = useState(false);
   const tabs =
     me.role === "admin"
-      ? [["home", "Overview"], ["interns", "Interns"], ["leaves", "Leave requests"], ["concerns", "Concerns"], ["attendance", "Attendance"]]
-      : [["home", "My day"], ...(FEATURES.internLeaveFiling ? [["leave", "File leave"]] : []), ["concern", "Lodge concern"], ["records", "My records"]];
+      ? [["home", "Overview"], ["interns", "Interns"], ["coas", "COA requests"], ["leaves", "Leave requests"], ["concerns", "Concerns"], ["attendance", "Attendance"]]
+      : [["home", "My day"], ...(FEATURES.internLeaveFiling ? [["leave", "File leave"]] : []), ["coa", "File COA"], ["concern", "Lodge concern"], ["records", "My records"]];
 
   return (
     <div style={{ maxWidth: 980, margin: "0 auto", padding: "20px 16px 60px" }}>
@@ -512,7 +514,8 @@ function Shell({ me, tab, setTab, onLogout, onChangePassword, children }) {
 
 /* ---------------------------- intern views ------------------------- */
 
-function InternView({ tab, me, attendance, leaves, concerns, persist, punch, notify, busy }) {
+function InternView({ tab, me, attendance, leaves, concerns, coas, persist, punch, notify, busy }) {
+  const myCoas = coas.filter((c) => c.userId === me.id).sort((a, b) => b.filedAt.localeCompare(a.filedAt));
   const myLeaves = leaves.filter((l) => l.userId === me.id).sort((a, b) => b.filedAt.localeCompare(a.filedAt));
   const myConcerns = concerns.filter((c) => c.userId === me.id).sort((a, b) => b.filedAt.localeCompare(a.filedAt));
   const myAttendance = attendance.filter((a) => a.userId === me.id).sort((a, b) => b.date.localeCompare(a.date));
@@ -552,6 +555,7 @@ function InternView({ tab, me, attendance, leaves, concerns, persist, punch, not
   }
 
   if (tab === "leave") return <LeaveForm me={me} leaves={leaves} persist={persist} notify={notify} busy={busy} myLeaves={myLeaves} />;
+  if (tab === "coa") return <CoaForm me={me} coas={coas} attendance={attendance} persist={persist} notify={notify} busy={busy} myCoas={myCoas} />;
   if (tab === "concern") return <ConcernForm me={me} concerns={concerns} persist={persist} notify={notify} busy={busy} myConcerns={myConcerns} />;
 
   return (
@@ -559,8 +563,8 @@ function InternView({ tab, me, attendance, leaves, concerns, persist, punch, not
       <Card title="My attendance">
         {myAttendance.length === 0 ? <Empty text="No time records yet. Clock in from My day to start your first one." /> : (
           <Table
-            head={["Date", "Time in", "Time out"]}
-            rows={myAttendance.map((a) => [fmtDate(a.date), fmtTime(a.timeIn), fmtTime(a.timeOut)])}
+            head={["Date", "Time in", "Time out", "Remarks"]}
+            rows={myAttendance.map((a) => [fmtDate(a.date), fmtTime(a.timeIn), fmtTime(a.timeOut), a.remark || ""])}
           />
         )}
       </Card>
@@ -638,6 +642,63 @@ function LeaveForm({ me, leaves, persist, notify, busy, myLeaves }) {
   );
 }
 
+function CoaForm({ me, coas, attendance, persist, notify, busy, myCoas }) {
+  const [date, setDate] = useState("");
+  const [timeIn, setTimeIn] = useState("");
+  const [timeOut, setTimeOut] = useState("");
+  const [reason, setReason] = useState("");
+  const [err, setErr] = useState(null);
+
+  async function submit() {
+    setErr(null);
+    if (!date) return setErr("Pick the date of the missed time log.");
+    if (date > todayKey()) return setErr("You can't file a COA for a future date.");
+    if (!timeIn || !timeOut) return setErr("Provide both the time in and time out for that day.");
+    if (timeOut <= timeIn) return setErr("Time out must be after time in.");
+    if (!reason.trim()) return setErr("Briefly explain why the log was missed.");
+    const existing = attendance.find((a) => a.userId === me.id && a.date === date);
+    if (existing && existing.timeIn && existing.timeOut) return setErr("That date already has a complete time record.");
+    if (coas.some((c) => c.userId === me.id && c.date === date && c.status === "Pending")) return setErr("You already have a pending COA for that date.");
+    const next = [...coas, { id: uid(), userId: me.id, date, timeIn, timeOut, reason: reason.trim(), status: "Pending", filedAt: new Date().toISOString() }];
+    if (await persist("coas", next)) {
+      setDate(""); setTimeIn(""); setTimeOut(""); setReason("");
+      notify("COA request filed. HR will review it.");
+    }
+  }
+
+  return (
+    <div style={{ display: "grid", gap: 16, gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))" }}>
+      <Card title="Request certificate of attendance">
+        <p style={{ fontSize: 13, color: T.muted, marginTop: 0 }}>Forgot to clock in or out? File the actual times you worked. Once HR approves, the record is added to your DTR marked as a manual entry.</p>
+        <Field label="Date of missed log">
+          <input style={inputStyle} type="date" max={todayKey()} value={date} onChange={(e) => setDate(e.target.value)} />
+        </Field>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <Field label="Actual time in"><input style={inputStyle} type="time" value={timeIn} onChange={(e) => setTimeIn(e.target.value)} /></Field>
+          <Field label="Actual time out"><input style={inputStyle} type="time" value={timeOut} onChange={(e) => setTimeOut(e.target.value)} /></Field>
+        </div>
+        <Field label="Reason">
+          <textarea style={{ ...inputStyle, minHeight: 70, resize: "vertical" }} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g., Forgot to clock out before leaving" />
+        </Field>
+        {err && <p style={{ color: T.red, fontSize: 13, margin: "0 0 10px" }}>{err}</p>}
+        <Btn kind="blue" disabled={busy} onClick={submit}>File COA request</Btn>
+      </Card>
+      <Card title="Your COA requests">
+        {myCoas.length === 0 ? <Empty text="Requests you file will appear here with their status." /> : (
+          myCoas.slice(0, 8).map((c) => (
+            <div key={c.id} style={{ padding: "10px 0", borderBottom: `1px solid ${T.border}` }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 13, fontWeight: 600 }}>
+                <span>{fmtDate(c.date)} · {c.timeIn}–{c.timeOut}</span><Badge status={c.status} />
+              </div>
+              <div style={{ fontSize: 12, color: T.muted, marginTop: 2 }}>{c.reason}</div>
+            </div>
+          ))
+        )}
+      </Card>
+    </div>
+  );
+}
+
 function ConcernForm({ me, concerns, persist, notify, busy, myConcerns }) {
   const [category, setCategory] = useState(CONCERN_CATS[0]);
   const [subject, setSubject] = useState("");
@@ -691,7 +752,7 @@ function ConcernForm({ me, concerns, persist, notify, busy, myConcerns }) {
 
 /* ---------------------------- admin views -------------------------- */
 
-function AdminView({ tab, users, attendance, leaves, concerns, persist, notify, busy }) {
+function AdminView({ tab, users, attendance, leaves, concerns, coas, persist, notify, busy }) {
   const [dtrFrom, setDtrFrom] = useState("");
   const [dtrTo, setDtrTo] = useState("");
   const interns = users.filter((u) => u.role === "intern");
@@ -710,9 +771,10 @@ function AdminView({ tab, users, attendance, leaves, concerns, persist, notify, 
       "Time In": fmtTime(a.timeIn),
       "Time Out": fmtTime(a.timeOut),
       "Hours Rendered": hoursOf(a),
+      Remarks: a.remark || "",
     }));
     const ws = XLSX.utils.json_to_sheet(rows);
-    ws["!cols"] = [{ wch: 12 }, { wch: 26 }, { wch: 10 }, { wch: 10 }, { wch: 14 }];
+    ws["!cols"] = [{ wch: 12 }, { wch: 26 }, { wch: 10 }, { wch: 10 }, { wch: 14 }, { wch: 32 }];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "DTR");
     const label = `${dtrFrom || "start"}_to_${dtrTo || "today"}`;
@@ -724,6 +786,7 @@ function AdminView({ tab, users, attendance, leaves, concerns, persist, notify, 
     const stats = [
       ["Interns", interns.filter((i) => i.active !== false).length],
       ["Clocked in today", attendance.filter((a) => a.date === todayKey() && !a.timeOut).length],
+      ["Pending COAs", coas.filter((c) => c.status === "Pending").length],
       ["Pending leaves", leaves.filter((l) => l.status === "Pending").length],
       ["Open concerns", concerns.filter((c) => c.status === "Open").length],
     ];
@@ -750,6 +813,52 @@ function AdminView({ tab, users, attendance, leaves, concerns, persist, notify, 
   }
 
   if (tab === "interns") return <ManageInterns users={users} interns={interns} persist={persist} notify={notify} busy={busy} />;
+
+  if (tab === "coas") {
+    const sorted = [...coas].sort((a, b) => (a.status === "Pending" ? -1 : 1) - (b.status === "Pending" ? -1 : 1) || b.filedAt.localeCompare(a.filedAt));
+
+    async function decideCoa(c, status) {
+      if (status === "Approved") {
+        const tin = new Date(`${c.date}T${c.timeIn}:00`).toISOString();
+        const tout = new Date(`${c.date}T${c.timeOut}:00`).toISOString();
+        const existing = attendance.find((a) => a.userId === c.userId && a.date === c.date);
+        const remark = "Filed manually (approved COA)";
+        const nextAtt = existing
+          ? attendance.map((a) => (a.id === existing.id ? { ...a, timeIn: a.timeIn || tin, timeOut: a.timeOut || tout, manual: true, remark } : a))
+          : [...attendance, { id: uid(), userId: c.userId, date: c.date, timeIn: tin, timeOut: tout, manual: true, remark }];
+        if (!(await persist("attendance", nextAtt))) return;
+      }
+      const nextCoas = coas.map((x) => (x.id === c.id ? { ...x, status, decidedAt: new Date().toISOString() } : x));
+      if (await persist("coas", nextCoas)) {
+        notify(status === "Approved" ? "COA approved — DTR updated with a manual-entry remark." : "COA request denied.");
+      }
+    }
+
+    return (
+      <Card title="Certificate of attendance requests">
+        {sorted.length === 0 ? <Empty text="No COA requests filed yet." /> : sorted.map((c) => (
+          <div key={c.id} style={{ padding: "12px 0", borderBottom: `1px solid ${T.border}` }}>
+            <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 600 }}>{nameOf(c.userId)} — {fmtDate(c.date)}</div>
+                <div style={{ fontFamily: MONO, fontSize: 13, color: T.ink, marginTop: 2 }}>{c.timeIn} – {c.timeOut}</div>
+                <div style={{ fontSize: 12, color: T.muted, marginTop: 2 }}>{c.reason} · filed {fmtDate(c.filedAt.slice(0, 10))}</div>
+              </div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <Badge status={c.status} />
+                {c.status === "Pending" && (
+                  <>
+                    <Btn kind="green" disabled={busy} style={{ padding: "6px 12px", fontSize: 12 }} onClick={() => decideCoa(c, "Approved")}>Approve</Btn>
+                    <Btn kind="red" disabled={busy} style={{ padding: "6px 12px", fontSize: 12 }} onClick={() => decideCoa(c, "Denied")}>Deny</Btn>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        ))}
+      </Card>
+    );
+  }
 
   if (tab === "leaves") {
     const sorted = [...leaves].sort((a, b) => b.filedAt.localeCompare(a.filedAt));
@@ -830,7 +939,7 @@ function AdminView({ tab, users, attendance, leaves, concerns, persist, notify, 
         <span style={{ fontSize: 12, color: T.faint, paddingBottom: 10 }}>{filteredAtt.length} record{filteredAtt.length === 1 ? "" : "s"}</span>
       </div>
       {filteredAtt.length === 0 ? <Empty text="No time records in this range." /> : (
-        <Table head={["Date", "Intern", "Time in", "Time out", "Hours"]} rows={filteredAtt.map((a) => [fmtDate(a.date), nameOf(a.userId), fmtTime(a.timeIn), fmtTime(a.timeOut), hoursOf(a)])} />
+        <Table head={["Date", "Intern", "Time in", "Time out", "Hours", "Remarks"]} rows={filteredAtt.map((a) => [fmtDate(a.date), nameOf(a.userId), fmtTime(a.timeIn), fmtTime(a.timeOut), hoursOf(a), a.remark || ""])} />
       )}
     </Card>
   );
