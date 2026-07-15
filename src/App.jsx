@@ -363,7 +363,7 @@ function LoginScreen({ onLogin }) {
           {err && <p style={{ color: T.red, fontSize: 13, margin: "0 0 10px" }}>{err}</p>}
           <Btn kind="blue" style={{ width: "100%" }} onClick={submit}>Sign in</Btn>
           <p style={{ fontSize: 12, color: T.faint, marginTop: 14, marginBottom: 0, textAlign: "center" }}>
-            First time here? HR seeds accounts. Default admin: <span style={{ fontFamily: MONO }}>admin@company.com / admin123</span>
+            No account yet? Ask HR to set one up for you.
           </p>
         </Card>
       </div>
