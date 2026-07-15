@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { storage } from "./storage.js";
+import * as XLSX from "xlsx";
 
 /* ------------------------------------------------------------------ */
 /*  InternDesk — a lightweight HRIS for student interns                */
@@ -7,7 +8,13 @@ import { storage } from "./storage.js";
 /*  (clocks in/out, files leave, lodges concerns).                     */
 /* ------------------------------------------------------------------ */
 
+/* Feature switches — flip internLeaveFiling to true to restore leave filing for interns. */
+const FEATURES = { internLeaveFiling: false };
+const LOGO_SQUARE = import.meta.env.BASE_URL + "logo-square.jpg";
+const LOGO_WIDE = import.meta.env.BASE_URL + "logo-horizontal.jpg";
+
 const T = {
+  blue: "#3E7CE0",
   bg: "#EEF1F4",
   surface: "#FFFFFF",
   ink: "#16233A",
@@ -92,6 +99,7 @@ function Btn({ children, kind = "primary", ...props }) {
   const styles = {
     primary: { background: T.ink, color: "#fff", border: "1px solid " + T.ink },
     green: { background: T.green, color: "#fff", border: "1px solid " + T.green },
+    blue: { background: T.blue, color: "#fff", border: "1px solid " + T.blue },
     red: { background: T.red, color: "#fff", border: "1px solid " + T.red },
     ghost: { background: "transparent", color: T.ink, border: `1px solid ${T.border}` },
   }[kind];
@@ -341,9 +349,9 @@ function LoginScreen({ onLogin }) {
     <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 20 }}>
       <div style={{ width: "100%", maxWidth: 400 }}>
         <div style={{ textAlign: "center", marginBottom: 22 }}>
-          <div style={{ fontFamily: MONO, fontSize: 12, letterSpacing: "0.2em", color: T.green, fontWeight: 600 }}>● ON THE CLOCK</div>
-          <h1 style={{ fontFamily: DISPLAY, fontSize: 34, margin: "6px 0 4px" }}>InternDesk</h1>
-          <p style={{ color: T.muted, fontSize: 14, margin: 0 }}>Time records, leave, and concerns — for interns.</p>
+          <img src={LOGO_SQUARE} alt="Freedom Outsourcing" style={{ width: 150, height: 150, objectFit: "contain" }} />
+          <h1 style={{ fontFamily: DISPLAY, fontSize: 28, margin: "4px 0 4px" }}>Freedom Outsourcing</h1>
+          <p style={{ color: T.muted, fontSize: 14, margin: 0 }}>Intern HRIS — time records and concerns.</p>
         </div>
         <Card>
           <Field label="Email">
@@ -353,7 +361,7 @@ function LoginScreen({ onLogin }) {
             <input style={inputStyle} type="password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
           </Field>
           {err && <p style={{ color: T.red, fontSize: 13, margin: "0 0 10px" }}>{err}</p>}
-          <Btn kind="green" style={{ width: "100%" }} onClick={submit}>Sign in</Btn>
+          <Btn kind="blue" style={{ width: "100%" }} onClick={submit}>Sign in</Btn>
           <p style={{ fontSize: 12, color: T.faint, marginTop: 14, marginBottom: 0, textAlign: "center" }}>
             First time here? HR seeds accounts. Default admin: <span style={{ fontFamily: MONO }}>admin@company.com / admin123</span>
           </p>
@@ -369,14 +377,14 @@ function Shell({ me, tab, setTab, onLogout, children }) {
   const tabs =
     me.role === "admin"
       ? [["home", "Overview"], ["interns", "Interns"], ["leaves", "Leave requests"], ["concerns", "Concerns"], ["attendance", "Attendance"]]
-      : [["home", "My day"], ["leave", "File leave"], ["concern", "Lodge concern"], ["records", "My records"]];
+      : [["home", "My day"], ...(FEATURES.internLeaveFiling ? [["leave", "File leave"]] : []), ["concern", "Lodge concern"], ["records", "My records"]];
 
   return (
     <div style={{ maxWidth: 980, margin: "0 auto", padding: "20px 16px 60px" }}>
       <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 18 }}>
-        <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-          <span style={{ fontFamily: DISPLAY, fontSize: 22, fontWeight: 700 }}>InternDesk</span>
-          <span style={{ fontFamily: MONO, fontSize: 11, color: T.green, fontWeight: 600, letterSpacing: "0.1em" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <img src={LOGO_WIDE} alt="Freedom Outsourcing" style={{ height: 40, objectFit: "contain" }} />
+          <span style={{ fontFamily: MONO, fontSize: 11, color: T.blue, fontWeight: 600, letterSpacing: "0.1em" }}>
             {me.role === "admin" ? "HR CONSOLE" : "INTERN"}
           </span>
         </div>
@@ -424,7 +432,7 @@ function InternView({ tab, me, attendance, leaves, concerns, persist, punch, not
       <div style={{ display: "grid", gap: 16 }}>
         <PunchCard user={me} attendance={attendance} onPunch={punch} busy={busy} />
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 16 }}>
-          <Card title="Pending leave requests">
+          {FEATURES.internLeaveFiling && <Card title="Pending leave requests">
             {myLeaves.filter((l) => l.status === "Pending").length === 0 ? (
               <Empty text="Nothing pending. File leave from the tab above when you need it." />
             ) : (
@@ -435,7 +443,7 @@ function InternView({ tab, me, attendance, leaves, concerns, persist, punch, not
                 </div>
               ))
             )}
-          </Card>
+          </Card>}
           <Card title="Open concerns">
             {myConcerns.filter((c) => c.status === "Open").length === 0 ? (
               <Empty text="No open concerns. If something's off, lodge it — HR reads every one." />
@@ -466,14 +474,14 @@ function InternView({ tab, me, attendance, leaves, concerns, persist, punch, not
           />
         )}
       </Card>
-      <Card title="My leave history">
+      {FEATURES.internLeaveFiling && <Card title="My leave history">
         {myLeaves.length === 0 ? <Empty text="No leave filed yet." /> : (
           <Table
             head={["Filed", "Type", "Dates", "Status"]}
             rows={myLeaves.map((l) => [fmtDate(l.filedAt.slice(0, 10)), l.type, `${fmtDate(l.from)} → ${fmtDate(l.to)}`, <Badge key={l.id} status={l.status} />])}
           />
         )}
-      </Card>
+      </Card>}
       <Card title="My concerns">
         {myConcerns.length === 0 ? <Empty text="No concerns lodged yet." /> : (
           <Table
@@ -594,8 +602,33 @@ function ConcernForm({ me, concerns, persist, notify, busy, myConcerns }) {
 /* ---------------------------- admin views -------------------------- */
 
 function AdminView({ tab, users, attendance, leaves, concerns, persist, notify, busy }) {
+  const [dtrFrom, setDtrFrom] = useState("");
+  const [dtrTo, setDtrTo] = useState("");
   const interns = users.filter((u) => u.role === "intern");
   const nameOf = (id) => users.find((u) => u.id === id)?.name || "Unknown";
+
+  const hoursOf = (a) => (a.timeIn && a.timeOut ? ((new Date(a.timeOut) - new Date(a.timeIn)) / 3600000).toFixed(2) : "");
+  const filteredAtt = attendance
+    .filter((a) => (!dtrFrom || a.date >= dtrFrom) && (!dtrTo || a.date <= dtrTo))
+    .sort((a, b) => a.date.localeCompare(b.date) || nameOf(a.userId).localeCompare(nameOf(b.userId)));
+
+  function exportDTR() {
+    if (filteredAtt.length === 0) return notify("No records in that date range to export.");
+    const rows = filteredAtt.map((a) => ({
+      Date: a.date,
+      Intern: nameOf(a.userId),
+      "Time In": fmtTime(a.timeIn),
+      "Time Out": fmtTime(a.timeOut),
+      "Hours Rendered": hoursOf(a),
+    }));
+    const ws = XLSX.utils.json_to_sheet(rows);
+    ws["!cols"] = [{ wch: 12 }, { wch: 26 }, { wch: 10 }, { wch: 10 }, { wch: 14 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "DTR");
+    const label = `${dtrFrom || "start"}_to_${dtrTo || "today"}`;
+    XLSX.writeFile(wb, `Freedom_Outsourcing_DTR_${label}.xlsx`);
+    notify("DTR exported to Excel.");
+  }
 
   if (tab === "home") {
     const stats = [
@@ -689,11 +722,25 @@ function AdminView({ tab, users, attendance, leaves, concerns, persist, notify, 
   }
 
   /* attendance tab */
-  const sortedAtt = [...attendance].sort((a, b) => b.date.localeCompare(a.date) || (b.timeIn || "").localeCompare(a.timeIn || ""));
   return (
-    <Card title="All attendance records">
-      {sortedAtt.length === 0 ? <Empty text="No time records yet." /> : (
-        <Table head={["Date", "Intern", "Time in", "Time out"]} rows={sortedAtt.map((a) => [fmtDate(a.date), nameOf(a.userId), fmtTime(a.timeIn), fmtTime(a.timeOut)])} />
+    <Card
+      title="Daily time records"
+      right={<Btn kind="blue" disabled={busy} style={{ padding: "7px 14px", fontSize: 13 }} onClick={exportDTR}>Export to Excel</Btn>}
+    >
+      <div style={{ display: "flex", gap: 10, alignItems: "end", flexWrap: "wrap", marginBottom: 14 }}>
+        <label style={{ fontSize: 12, fontWeight: 600, color: T.muted }}>
+          From<br />
+          <input style={{ ...inputStyle, width: 160, marginTop: 4 }} type="date" value={dtrFrom} onChange={(e) => setDtrFrom(e.target.value)} />
+        </label>
+        <label style={{ fontSize: 12, fontWeight: 600, color: T.muted }}>
+          To<br />
+          <input style={{ ...inputStyle, width: 160, marginTop: 4 }} type="date" value={dtrTo} onChange={(e) => setDtrTo(e.target.value)} />
+        </label>
+        {(dtrFrom || dtrTo) && <Btn kind="ghost" style={{ padding: "8px 14px", fontSize: 13 }} onClick={() => { setDtrFrom(""); setDtrTo(""); }}>Clear filter</Btn>}
+        <span style={{ fontSize: 12, color: T.faint, paddingBottom: 10 }}>{filteredAtt.length} record{filteredAtt.length === 1 ? "" : "s"}</span>
+      </div>
+      {filteredAtt.length === 0 ? <Empty text="No time records in this range." /> : (
+        <Table head={["Date", "Intern", "Time in", "Time out", "Hours"]} rows={filteredAtt.map((a) => [fmtDate(a.date), nameOf(a.userId), fmtTime(a.timeIn), fmtTime(a.timeOut), hoursOf(a)])} />
       )}
     </Card>
   );
