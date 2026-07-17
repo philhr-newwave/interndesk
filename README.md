@@ -36,21 +36,15 @@ Change this account's details before real use — add yourself as needed and tre
 
 `npm run build` produces a static site in `dist/`. Deploy it to Vercel, Netlify, or any static host.
 
-## ⚠️ Important limitations of this version
+## Data & accounts (Supabase)
 
-1. **Storage is per-browser.** The app currently persists to `localStorage` via the adapter in `src/storage.js`. Each device keeps its own copy of the data — an intern clocking in on their laptop will **not** appear on HR's dashboard. This version is suitable for demos and evaluation only.
-2. **Passwords are stored in plain text** in that same local storage. Do not reuse real passwords.
+The app uses a shared Supabase database (`src/db.js`), so all interns and HR see the same live data from any device. Tables are defined in `supabase-setup.sql` — run it once in the Supabase SQL Editor when setting up a new project.
 
-## Upgrading to real multi-user use (recommended: Supabase)
+Passwords are stored as salted SHA-256 hashes, never plain text. New and reset accounts are flagged to choose their own password on first sign-in.
 
-All persistence goes through four functions in `src/storage.js` (`get`, `set`, `delete`). To make the system genuinely shared:
+## ⚠️ Remaining security limitations
 
-1. Create a free project at supabase.com.
-2. Create a table, e.g. `kv (key text primary key, value text)`.
-3. Install the client: `npm install @supabase/supabase-js`.
-4. Rewrite `src/storage.js` to read/write that table instead of `localStorage`, using your project URL and anon key from environment variables (`.env`, which is gitignored).
-
-For production-grade security you should go further: move authentication to Supabase Auth (hashed passwords, sessions), split the single key-value store into proper tables (`users`, `attendance`, `leaves`, `concerns`), and enforce row-level security so interns can only read their own records. The UI code can remain largely unchanged.
+Access control currently relies on the app itself: the database's row-level-security policies grant full access to the anon key, which ships in the front-end bundle. A technically savvy person could read or modify data directly with that key. For a small internal pilot this is an accepted trade-off; the hardening path is Supabase Auth with per-role RLS policies (interns read/write only their own rows).
 
 ## Tech
 

@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
-import { storage } from "./storage.js";
+import { storage } from "./storage.js"; /* session pointer only */
+import { db, genSalt, hashPw, verifyPw } from "./db.js";
 import * as XLSX from "xlsx";
 
 /* ------------------------------------------------------------------ */
@@ -45,31 +46,7 @@ const fmtDate = (d) => new Date(d + (d.length === 10 ? "T00:00:00" : "")).toLoca
 
 /* ---------------------------- storage ----------------------------- */
 
-async function loadKey(key, fallback) {
-  try {
-    const r = await storage.get(key);
-    return r ? JSON.parse(r.value) : fallback;
-  } catch {
-    return fallback;
-  }
-}
-async function saveKey(key, value) {
-  try {
-    await storage.set(key, JSON.stringify(value));
-    return true;
-  } catch {
-    return false;
-  }
-}
 
-const SEED_ADMIN = {
-  id: "admin-1",
-  role: "admin",
-  name: "HR Administrator",
-  email: "philhr@new-wave.com.au",
-  password: "admin123",
-  active: true,
-};
 
 /* ---------------------------- shared UI --------------------------- */
 
@@ -243,28 +220,34 @@ export default function App() {
     document.head.appendChild(link);
   }, []);
 
+  const [loadError, setLoadError] = useState(null);
+
+  async function reload() {
+    const data = await db.fetchAll();
+    setUsers(data.users);
+    setAttendance(data.attendance);
+    setLeaves(data.leaves);
+    setCoas(data.coas);
+    setConcerns(data.concerns);
+    return data;
+  }
+
   useEffect(() => {
     (async () => {
-      let u = await loadKey("hris:users", null);
-      if (!u || !u.length) {
-        u = [SEED_ADMIN];
-        await saveKey("hris:users", u);
-      } else if (u.some((x) => x.email === "admin@company.com")) {
-        /* one-time migration: admin email changed to philhr@new-wave.com.au */
-        u = u.map((x) => (x.email === "admin@company.com" ? { ...x, email: "philhr@new-wave.com.au" } : x));
-        await saveKey("hris:users", u);
-      }
-      setUsers(u);
-      setAttendance(await loadKey("hris:attendance", []));
-      setLeaves(await loadKey("hris:leaves", []));
-      setConcerns(await loadKey("hris:concerns", []));
-      setCoas(await loadKey("hris:coas", []));
       try {
-        const s = await storage.get("hris:session");
-        if (s) setSessionId(JSON.parse(s.value));
-      } catch {}
+        await reload();
+        try {
+          const s = await storage.get("hris:session");
+          if (s) setSessionId(JSON.parse(s.value));
+        } catch {}
+      } catch (e) {
+        setLoadError(e.message || "Could not reach the database.");
+      }
       setLoading(false);
     })();
+    /* keep dashboards fresh: refetch every 60s */
+    const t = setInterval(() => { reload().catch(() => {}); }, 60000);
+    return () => clearInterval(t);
   }, []);
 
   const notify = (msg) => {
@@ -272,19 +255,38 @@ export default function App() {
     setTimeout(() => setToast(null), 2600);
   };
 
-  async function persist(kind, next) {
-    setBusy(true);
-    const setters = { users: setUsers, attendance: setAttendance, leaves: setLeaves, concerns: setConcerns, coas: setCoas };
-    setters[kind](next);
-    const ok = await saveKey("hris:" + kind, next);
-    if (!ok) notify("Couldn't save — check your connection and try again.");
-    setBusy(false);
-    return ok;
-  }
+  /* Row-level operations against the shared database. Each op refetches so
+     every screen reflects the true shared state, not a local guess. */
+  const api = {
+    insert: async (table, row) => {
+      setBusy(true);
+      try {
+        await db.insert(table, row);
+        await reload();
+        return true;
+      } catch (e) {
+        notify("Couldn't save — " + (e.message || "check your connection."));
+        return false;
+      } finally { setBusy(false); }
+    },
+    update: async (table, id, patch) => {
+      setBusy(true);
+      try {
+        await db.update(table, id, patch);
+        await reload();
+        return true;
+      } catch (e) {
+        notify("Couldn't save — " + (e.message || "check your connection."));
+        return false;
+      } finally { setBusy(false); }
+    },
+  };
 
   async function login(email, password) {
-    const u = users.find((x) => x.email.toLowerCase() === email.trim().toLowerCase() && x.password === password);
-    if (!u) return "Email or password doesn't match any account.";
+    let list = users;
+    try { list = (await reload()).users; } catch {}
+    const u = list.find((x) => x.email.toLowerCase() === email.trim().toLowerCase());
+    if (!u || !(await verifyPw(u, password))) return "Email or password doesn't match any account.";
     if (u.active === false) return "This account has been deactivated. Contact HR.";
     setSessionId(u.id);
     setTab("home");
@@ -298,26 +300,28 @@ export default function App() {
   }
 
   async function changePassword(userId, newPassword) {
-    const next = users.map((u) => (u.id === userId ? { ...u, password: newPassword, pwChangedAt: new Date().toISOString() } : u));
-    if (await persist("users", next)) {
+    const pwSalt = genSalt();
+    const pwHash = await hashPw(pwSalt, newPassword);
+    if (await api.update("users", userId, { pwSalt, pwHash, mustChangePw: false })) {
       notify("Password updated.");
       return true;
     }
     return false;
   }
 
-  /* The seeded admin ships with a known default password — force a change before use. */
-  const mustChangePassword = me && me.email === "philhr@new-wave.com.au" && me.password === "admin123";
+  /* Accounts flagged mustChangePw (seeded admin, HR resets) must set a new password first. */
+  const mustChangePassword = me && me.mustChangePw === true;
 
   async function punch(kind) {
     const key = todayKey();
-    let next;
+    let ok;
     if (kind === "in") {
-      next = [...attendance, { id: uid(), userId: me.id, date: key, timeIn: new Date().toISOString(), timeOut: null }];
+      ok = await api.insert("attendance", { id: uid(), userId: me.id, date: key, timeIn: new Date().toISOString(), timeOut: null });
     } else {
-      next = attendance.map((a) => (a.userId === me.id && a.date === key ? { ...a, timeOut: new Date().toISOString() } : a));
+      const rec = attendance.find((a) => a.userId === me.id && a.date === key);
+      ok = rec && (await api.update("attendance", rec.id, { timeOut: new Date().toISOString() }));
     }
-    if (await persist("attendance", next)) notify(kind === "in" ? "Clocked in — have a good shift." : "Clocked out. See you tomorrow!");
+    if (ok) notify(kind === "in" ? "Clocked in — have a good shift." : "Clocked out. See you tomorrow!");
   }
 
   if (loading) {
@@ -336,15 +340,15 @@ export default function App() {
         </div>
       )}
       {!me ? (
-        <LoginScreen onLogin={login} />
+        <LoginScreen onLogin={login} loadError={loadError} />
       ) : mustChangePassword ? (
         <ForcePasswordChange me={me} onChange={changePassword} onLogout={logout} />
       ) : (
         <Shell me={me} tab={tab} setTab={setTab} onLogout={logout} onChangePassword={changePassword}>
           {me.role === "admin" ? (
-            <AdminView tab={tab} users={users} attendance={attendance} leaves={leaves} concerns={concerns} coas={coas} persist={persist} notify={notify} busy={busy} />
+            <AdminView tab={tab} users={users} attendance={attendance} leaves={leaves} concerns={concerns} coas={coas} api={api} notify={notify} busy={busy} />
           ) : (
-            <InternView tab={tab} me={me} attendance={attendance} leaves={leaves} concerns={concerns} coas={coas} persist={persist} punch={punch} notify={notify} busy={busy} />
+            <InternView tab={tab} me={me} attendance={attendance} leaves={leaves} concerns={concerns} coas={coas} api={api} punch={punch} notify={notify} busy={busy} />
           )}
         </Shell>
       )}
@@ -354,7 +358,7 @@ export default function App() {
 
 /* ---------------------------- login -------------------------------- */
 
-function LoginScreen({ onLogin }) {
+function LoginScreen({ onLogin, loadError }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [err, setErr] = useState(null);
@@ -380,6 +384,7 @@ function LoginScreen({ onLogin }) {
           <Field label="Password">
             <input style={inputStyle} type="password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
           </Field>
+          {loadError && <p style={{ color: T.red, fontSize: 13, margin: "0 0 10px" }}>Can't reach the database: {loadError}</p>}
           {err && <p style={{ color: T.red, fontSize: 13, margin: "0 0 10px" }}>{err}</p>}
           <Btn kind="blue" style={{ width: "100%" }} onClick={submit}>Sign in</Btn>
           <p style={{ fontSize: 12, color: T.faint, marginTop: 14, marginBottom: 0, textAlign: "center" }}>
@@ -393,7 +398,7 @@ function LoginScreen({ onLogin }) {
 
 /* ------------------------ password screens ------------------------- */
 
-function PasswordFields({ onSubmit, submitLabel, requireCurrent, currentPassword }) {
+function PasswordFields({ onSubmit, submitLabel, requireCurrent, currentUser }) {
   const [cur, setCur] = useState("");
   const [pw1, setPw1] = useState("");
   const [pw2, setPw2] = useState("");
@@ -401,7 +406,7 @@ function PasswordFields({ onSubmit, submitLabel, requireCurrent, currentPassword
 
   async function submit() {
     setErr(null);
-    if (requireCurrent && cur !== currentPassword) return setErr("Current password is incorrect.");
+    if (requireCurrent && !(await verifyPw(currentUser, cur))) return setErr("Current password is incorrect.");
     if (pw1.length < 8) return setErr("New password must be at least 8 characters.");
     if (pw1 === "admin123") return setErr("Pick something other than the default password.");
     if (pw1 !== pw2) return setErr("The two entries don't match.");
@@ -434,8 +439,8 @@ function ForcePasswordChange({ me, onChange, onLogout }) {
       <div style={{ width: "100%", maxWidth: 400 }}>
         <div style={{ textAlign: "center", marginBottom: 18 }}>
           <img src={LOGO_SQUARE} alt="Freedom Outsourcing" style={{ width: 110, height: 110, objectFit: "contain" }} />
-          <h1 style={{ fontFamily: DISPLAY, fontSize: 22, margin: "6px 0 4px" }}>Set a new admin password</h1>
-          <p style={{ color: T.muted, fontSize: 13, margin: 0 }}>This account is still using the default password. Choose a new one to continue.</p>
+          <h1 style={{ fontFamily: DISPLAY, fontSize: 22, margin: "6px 0 4px" }}>Set your new password</h1>
+          <p style={{ color: T.muted, fontSize: 13, margin: 0 }}>This account is using a temporary password. Choose your own to continue.</p>
         </div>
         <Card>
           <PasswordFields submitLabel="Save new password" onSubmit={(pw) => onChange(me.id, pw)} />
@@ -477,7 +482,7 @@ function Shell({ me, tab, setTab, onLogout, onChangePassword, children }) {
             <Card title="Change password" right={<button onClick={() => setShowPw(false)} style={{ background: "none", border: "none", fontSize: 18, color: T.muted, cursor: "pointer" }}>×</button>}>
               <PasswordFields
                 requireCurrent
-                currentPassword={me.password}
+                currentUser={me}
                 submitLabel="Update password"
                 onSubmit={async (pw) => { const ok = await onChangePassword(me.id, pw); if (ok) setShowPw(false); return ok; }}
               />
@@ -514,7 +519,7 @@ function Shell({ me, tab, setTab, onLogout, onChangePassword, children }) {
 
 /* ---------------------------- intern views ------------------------- */
 
-function InternView({ tab, me, attendance, leaves, concerns, coas, persist, punch, notify, busy }) {
+function InternView({ tab, me, attendance, leaves, concerns, coas, api, punch, notify, busy }) {
   const myCoas = coas.filter((c) => c.userId === me.id).sort((a, b) => b.filedAt.localeCompare(a.filedAt));
   const myLeaves = leaves.filter((l) => l.userId === me.id).sort((a, b) => b.filedAt.localeCompare(a.filedAt));
   const myConcerns = concerns.filter((c) => c.userId === me.id).sort((a, b) => b.filedAt.localeCompare(a.filedAt));
@@ -554,9 +559,9 @@ function InternView({ tab, me, attendance, leaves, concerns, coas, persist, punc
     );
   }
 
-  if (tab === "leave") return <LeaveForm me={me} leaves={leaves} persist={persist} notify={notify} busy={busy} myLeaves={myLeaves} />;
-  if (tab === "coa") return <CoaForm me={me} coas={coas} attendance={attendance} persist={persist} notify={notify} busy={busy} myCoas={myCoas} />;
-  if (tab === "concern") return <ConcernForm me={me} concerns={concerns} persist={persist} notify={notify} busy={busy} myConcerns={myConcerns} />;
+  if (tab === "leave") return <LeaveForm me={me} leaves={leaves} api={api} notify={notify} busy={busy} myLeaves={myLeaves} />;
+  if (tab === "coa") return <CoaForm me={me} coas={coas} attendance={attendance} api={api} notify={notify} busy={busy} myCoas={myCoas} />;
+  if (tab === "concern") return <ConcernForm me={me} concerns={concerns} api={api} notify={notify} busy={busy} myConcerns={myConcerns} />;
 
   return (
     <div style={{ display: "grid", gap: 16 }}>
@@ -588,7 +593,7 @@ function InternView({ tab, me, attendance, leaves, concerns, coas, persist, punc
   );
 }
 
-function LeaveForm({ me, leaves, persist, notify, busy, myLeaves }) {
+function LeaveForm({ me, leaves, api, notify, busy, myLeaves }) {
   const [type, setType] = useState(LEAVE_TYPES[0]);
   const [from, setFrom] = useState(todayKey());
   const [to, setTo] = useState(todayKey());
@@ -600,8 +605,7 @@ function LeaveForm({ me, leaves, persist, notify, busy, myLeaves }) {
     if (!from || !to) return setErr("Pick both a start and end date.");
     if (to < from) return setErr("End date can't be before the start date.");
     if (!reason.trim()) return setErr("Add a short reason so HR can act on it.");
-    const next = [...leaves, { id: uid(), userId: me.id, type, from, to, reason: reason.trim(), status: "Pending", filedAt: new Date().toISOString() }];
-    if (await persist("leaves", next)) {
+    if (await api.insert("leaves", { id: uid(), userId: me.id, type, from, to, reason: reason.trim(), status: "Pending", filedAt: new Date().toISOString() })) {
       setReason("");
       notify("Leave request filed. HR will review it.");
     }
@@ -642,7 +646,7 @@ function LeaveForm({ me, leaves, persist, notify, busy, myLeaves }) {
   );
 }
 
-function CoaForm({ me, coas, attendance, persist, notify, busy, myCoas }) {
+function CoaForm({ me, coas, attendance, api, notify, busy, myCoas }) {
   const [date, setDate] = useState("");
   const [timeIn, setTimeIn] = useState("");
   const [timeOut, setTimeOut] = useState("");
@@ -659,8 +663,7 @@ function CoaForm({ me, coas, attendance, persist, notify, busy, myCoas }) {
     const existing = attendance.find((a) => a.userId === me.id && a.date === date);
     if (existing && existing.timeIn && existing.timeOut) return setErr("That date already has a complete time record.");
     if (coas.some((c) => c.userId === me.id && c.date === date && c.status === "Pending")) return setErr("You already have a pending COA for that date.");
-    const next = [...coas, { id: uid(), userId: me.id, date, timeIn, timeOut, reason: reason.trim(), status: "Pending", filedAt: new Date().toISOString() }];
-    if (await persist("coas", next)) {
+    if (await api.insert("coas", { id: uid(), userId: me.id, date, timeIn, timeOut, reason: reason.trim(), status: "Pending", filedAt: new Date().toISOString() })) {
       setDate(""); setTimeIn(""); setTimeOut(""); setReason("");
       notify("COA request filed. HR will review it.");
     }
@@ -699,7 +702,7 @@ function CoaForm({ me, coas, attendance, persist, notify, busy, myCoas }) {
   );
 }
 
-function ConcernForm({ me, concerns, persist, notify, busy, myConcerns }) {
+function ConcernForm({ me, concerns, api, notify, busy, myConcerns }) {
   const [category, setCategory] = useState(CONCERN_CATS[0]);
   const [subject, setSubject] = useState("");
   const [details, setDetails] = useState("");
@@ -709,8 +712,7 @@ function ConcernForm({ me, concerns, persist, notify, busy, myConcerns }) {
     setErr(null);
     if (!subject.trim()) return setErr("Give your concern a short subject line.");
     if (!details.trim()) return setErr("Describe what happened so HR can help.");
-    const next = [...concerns, { id: uid(), userId: me.id, category, subject: subject.trim(), details: details.trim(), status: "Open", filedAt: new Date().toISOString() }];
-    if (await persist("concerns", next)) {
+    if (await api.insert("concerns", { id: uid(), userId: me.id, category, subject: subject.trim(), details: details.trim(), status: "Open", filedAt: new Date().toISOString() })) {
       setSubject(""); setDetails("");
       notify("Concern lodged. HR has been notified.");
     }
@@ -752,7 +754,7 @@ function ConcernForm({ me, concerns, persist, notify, busy, myConcerns }) {
 
 /* ---------------------------- admin views -------------------------- */
 
-function AdminView({ tab, users, attendance, leaves, concerns, coas, persist, notify, busy }) {
+function AdminView({ tab, users, attendance, leaves, concerns, coas, api, notify, busy }) {
   const [dtrFrom, setDtrFrom] = useState("");
   const [dtrTo, setDtrTo] = useState("");
   const interns = users.filter((u) => u.role === "intern");
@@ -812,7 +814,7 @@ function AdminView({ tab, users, attendance, leaves, concerns, coas, persist, no
     );
   }
 
-  if (tab === "interns") return <ManageInterns users={users} interns={interns} persist={persist} notify={notify} busy={busy} />;
+  if (tab === "interns") return <ManageInterns users={users} interns={interns} api={api} notify={notify} busy={busy} />;
 
   if (tab === "coas") {
     const sorted = [...coas].sort((a, b) => (a.status === "Pending" ? -1 : 1) - (b.status === "Pending" ? -1 : 1) || b.filedAt.localeCompare(a.filedAt));
@@ -823,13 +825,12 @@ function AdminView({ tab, users, attendance, leaves, concerns, coas, persist, no
         const tout = new Date(`${c.date}T${c.timeOut}:00`).toISOString();
         const existing = attendance.find((a) => a.userId === c.userId && a.date === c.date);
         const remark = "Filed manually (approved COA)";
-        const nextAtt = existing
-          ? attendance.map((a) => (a.id === existing.id ? { ...a, timeIn: a.timeIn || tin, timeOut: a.timeOut || tout, manual: true, remark } : a))
-          : [...attendance, { id: uid(), userId: c.userId, date: c.date, timeIn: tin, timeOut: tout, manual: true, remark }];
-        if (!(await persist("attendance", nextAtt))) return;
+        const ok = existing
+          ? await api.update("attendance", existing.id, { timeIn: existing.timeIn || tin, timeOut: existing.timeOut || tout, manual: true, remark })
+          : await api.insert("attendance", { id: uid(), userId: c.userId, date: c.date, timeIn: tin, timeOut: tout, manual: true, remark });
+        if (!ok) return;
       }
-      const nextCoas = coas.map((x) => (x.id === c.id ? { ...x, status, decidedAt: new Date().toISOString() } : x));
-      if (await persist("coas", nextCoas)) {
+      if (await api.update("coas", c.id, { status, decidedAt: new Date().toISOString() })) {
         notify(status === "Approved" ? "COA approved — DTR updated with a manual-entry remark." : "COA request denied.");
       }
     }
@@ -863,8 +864,7 @@ function AdminView({ tab, users, attendance, leaves, concerns, coas, persist, no
   if (tab === "leaves") {
     const sorted = [...leaves].sort((a, b) => b.filedAt.localeCompare(a.filedAt));
     async function decide(id, status) {
-      const next = leaves.map((l) => (l.id === id ? { ...l, status } : l));
-      if (await persist("leaves", next)) notify(`Leave request ${status.toLowerCase()}.`);
+      if (await api.update("leaves", id, { status })) notify(`Leave request ${status.toLowerCase()}.`);
     }
     return (
       <Card title="Leave requests">
@@ -895,8 +895,7 @@ function AdminView({ tab, users, attendance, leaves, concerns, coas, persist, no
     const sorted = [...concerns].sort((a, b) => b.filedAt.localeCompare(a.filedAt));
     async function resolve(id) {
       const note = prompt("Add a short resolution note for the intern (optional):") || "";
-      const next = concerns.map((c) => (c.id === id ? { ...c, status: "Resolved", resolution: note } : c));
-      if (await persist("concerns", next)) notify("Concern marked resolved.");
+      if (await api.update("concerns", id, { status: "Resolved", resolution: note })) notify("Concern marked resolved.");
     }
     return (
       <Card title="Lodged concerns">
@@ -945,7 +944,7 @@ function AdminView({ tab, users, attendance, leaves, concerns, coas, persist, no
   );
 }
 
-function ManageInterns({ users, interns, persist, notify, busy }) {
+function ManageInterns({ users, interns, api, notify, busy }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [school, setSchool] = useState("");
@@ -957,24 +956,26 @@ function ManageInterns({ users, interns, persist, notify, busy }) {
     setErr(null);
     if (!name.trim() || !email.trim() || !password.trim()) return setErr("Name, email, and a starting password are required.");
     if (users.some((u) => u.email.toLowerCase() === email.trim().toLowerCase())) return setErr("That email is already registered.");
-    const next = [...users, { id: uid(), role: "intern", name: name.trim(), email: email.trim(), school: school.trim(), dept: dept.trim(), password, active: true, addedAt: new Date().toISOString() }];
-    if (await persist("users", next)) {
+    const pwSalt = genSalt();
+    const pwHash = await hashPw(pwSalt, password);
+    if (await api.insert("users", { id: uid(), role: "intern", name: name.trim(), email: email.trim(), school: school.trim(), dept: dept.trim(), pwSalt, pwHash, active: true, mustChangePw: true })) {
       setName(""); setEmail(""); setSchool(""); setDept(""); setPassword("");
       notify("Intern account created. Share their login details with them.");
     }
   }
 
   async function resetPassword(id, name) {
-    const pw = prompt(`New password for ${name} (at least 8 characters):`);
+    const pw = prompt(`New temporary password for ${name} (at least 8 characters):`);
     if (pw === null) return;
     if (pw.length < 8) return notify("Password not changed — it must be at least 8 characters.");
-    const next = users.map((u) => (u.id === id ? { ...u, password: pw, pwChangedAt: new Date().toISOString() } : u));
-    if (await persist("users", next)) notify(`Password reset for ${name}. Share it with them securely.`);
+    const pwSalt = genSalt();
+    const pwHash = await hashPw(pwSalt, pw);
+    if (await api.update("users", id, { pwSalt, pwHash, mustChangePw: true })) notify(`Password reset for ${name}. They'll be asked to choose their own on next sign-in.`);
   }
 
   async function toggleActive(id) {
-    const next = users.map((u) => (u.id === id ? { ...u, active: u.active === false } : u));
-    if (await persist("users", next)) notify("Account status updated.");
+    const u = users.find((x) => x.id === id);
+    if (await api.update("users", id, { active: u.active === false })) notify("Account status updated.");
   }
 
   return (
